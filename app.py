@@ -60,6 +60,12 @@ class JiraClient:
                 "Story point estimate",
                 "Story Points",
             ),
+            "qa_assigned": self._find_field(
+                available_fields,
+                "QA Assigned",
+                "QA Assignee",
+                "QA Owner",
+            ),
         }
         requested_fields = [
             "summary", "description", "issuetype", "status", "priority", "labels", "issuelinks",
@@ -195,6 +201,7 @@ def analyze_coverage(
     issues: list[dict[str, Any]],
     execution_field_id: str | None = "customfield_10097",
     story_points_field_id: str | None = "customfield_10016",
+    qa_assigned_field_id: str | None = None,
     jira_base_url: str = "",
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -210,6 +217,7 @@ def analyze_coverage(
     tc_details: list[dict[str, str]] = []
     operational_items: list[dict[str, Any]] = []
     owner_load: defaultdict[str, Counter[str]] = defaultdict(Counter)
+    qa_load: defaultdict[str, Counter[str]] = defaultdict(Counter)
     total_points = 0.0
     completed_points = 0.0
 
@@ -221,6 +229,8 @@ def analyze_coverage(
         status[status_name] += 1
         status_age = age_hours(fields.get("statuscategorychangedate") or fields.get("updated"), now)
         assignee = (fields.get("assignee") or {}).get("displayName") or "Sin asignar"
+        qa_assigned = _field_value(fields.get(qa_assigned_field_id)) if qa_assigned_field_id else None
+        qa_assigned = qa_assigned or "Sin QA asignado"
         issue_points = float(fields.get(story_points_field_id) or 0) if story_points_field_id else 0
         points[issue_type] += issue_points
         total_points += issue_points
@@ -286,6 +296,7 @@ def analyze_coverage(
             item_stage = bug_stage
         if item_stage:
             owner_load[assignee][item_stage] += 1
+            qa_load[qa_assigned][item_stage] += 1
             operational_items.append({
                 "key": issue["key"],
                 "summary": fields["summary"],
@@ -293,7 +304,9 @@ def analyze_coverage(
                 "status": status_name,
                 "stage": item_stage,
                 "age_hours": status_age,
-                "assignee": assignee,
+                "assignee": f"Dev: {assignee} · QA: {qa_assigned}",
+                "developer_assigned": assignee,
+                "qa_assigned": qa_assigned,
                 "priority": (fields.get("priority") or {}).get("name", "None"),
                 "blocked": "block" in status_name.casefold() or any(
                     str(label).casefold() in {"blocked", "impediment"} for label in (fields.get("labels") or [])
@@ -379,6 +392,8 @@ def analyze_coverage(
             message = f"{item['key']} espera UAT hace {item['age_hours']} h"
         if message:
             alerts.append({**item, "message": message, "level": level})
+        if item["stage"] in {"ready_for_qa", "testing", "ready_for_uat"} and item["qa_assigned"] == "Sin QA asignado":
+            alerts.append({**item, "message": f"{item['key']} está en {item['status']} sin QA Assigned", "level": "critical"})
     for key, value in coverage.items():
         if value["count"] < 3:
             alerts.append({
@@ -396,10 +411,30 @@ def analyze_coverage(
         counts["test_cases"] + counts["bugs"] for stage, counts in delivery_workflow.items()
         if stage in {"ready_for_qa", "testing", "ready_for_uat"}
     )
+    active_stages = {
+        "pending_development", "development", "failed",
+        "ready_for_qa", "testing", "ready_for_uat", "workflow_anomaly", "other",
+    }
+    active_items = [item for item in operational_items if item["stage"] in active_stages]
+    development_responsibility = len(active_items)
+    development_unassigned = sum(
+        1 for item in active_items if item["developer_assigned"] == "Sin asignar"
+    )
     team_capacity = {
-        "developers": {"people": 5, "queue": developer_queue, "items_per_person": round(developer_queue / 5, 1)},
+        "developers": {
+            "people": 5,
+            "active_total": development_responsibility,
+            "unassigned": development_unassigned,
+            "queue": developer_queue,
+            "items_per_person": round(development_responsibility / 5, 1),
+            "queue_per_person": round(developer_queue / 5, 1),
+        },
         "qa": {"people": 2, "queue": qa_queue, "items_per_person": round(qa_queue / 2, 1)},
-        "owner_load": {owner: dict(counts) for owner, counts in sorted(owner_load.items())},
+        "owner_load": {
+            **{f"Desarrollo · {owner}": dict(counts) for owner, counts in sorted(owner_load.items())},
+            **{f"QA · {owner}": dict(counts) for owner, counts in sorted(qa_load.items())},
+        },
+        "qa_load": {owner: dict(counts) for owner, counts in sorted(qa_load.items())},
     }
 
     return {
@@ -461,17 +496,19 @@ def analyze_coverage(
         "field_mapping": {
             "execution_status": execution_field_id,
             "story_points": story_points_field_id,
+            "qa_assigned": qa_assigned_field_id,
         },
         "data_warnings": [
             warning for condition, warning in [
                 (execution_field_id is None, "No se encontró el campo Execution Status en Jira"),
                 (story_points_field_id is None, "No se encontró el campo Story point estimate en Jira"),
+                (qa_assigned_field_id is None, "No se encontró el campo QA Assigned en Jira"),
             ] if condition
         ],
     }
 
 
-app = FastAPI(title="OrangeHRM QA Manager Agent", version="1.2.0")
+app = FastAPI(title="OrangeHRM QA Manager Agent", version="1.3.1")
 
 DASHBOARD_HTML = """<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -492,13 +529,13 @@ a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}.aler
 <article class="card wide"><h3>Cobertura por historia</h3><table><thead><tr><th>Historia</th><th>Casos</th><th>Riesgo</th><th>Entrega</th></tr></thead><tbody id="coverage"></tbody></table></article>
 <article class="card"><h3>Último resultado</h3><div id="execution"></div></article><article class="card"><h3>Riesgos</h3><ul id="risks"></ul></article>
 <article class="card wide"><h3>Alertas operativas</h3><div id="alerts"></div></article><article class="card"><h3>Capacidad del equipo</h3><div id="capacity"></div></article><article class="card"><h3>Proyección del sprint</h3><div id="forecast"></div></article>
-<article class="card full"><h3>Seguimiento diario por antigüedad</h3><div class="item-table"><table><thead><tr><th>Elemento</th><th>Tipo</th><th>Estado</th><th>Responsable</th><th>Tiempo en estado</th></tr></thead><tbody id="operational"></tbody></table></div></article>
+<article class="card full"><h3>Seguimiento diario por antigüedad</h3><div class="item-table"><table><thead><tr><th>Elemento</th><th>Tipo</th><th>Estado</th><th>Responsables (Dev / QA)</th><th>Tiempo en estado</th></tr></thead><tbody id="operational"></tbody></table></div></article>
 <article class="card full"><div class="report-title"><h2>Informe automático del sprint</h2><button id="print" class="secondary" onclick="window.print()">Imprimir / Guardar PDF</button></div><p id="summary"></p><h3>Avance por story points</h3><p id="points"></p><div class="bar"><span id="pointsbar"></span></div><h3>Bugs abiertos por prioridad</h3><div id="bugs"></div><h3>Acciones recomendadas</h3><ol id="actions"></ol></article>
 </section></main>
 <script>function esc(s){return String(s).replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]))}
 function showStage(dw,stage,id){const x=dw[stage]||{total:0,test_cases:0,bugs:0};document.getElementById(id).textContent=x.total;document.getElementById(id+'break').textContent=x.test_cases+' TC · '+x.bugs+' Bugs'}
 function issueLink(x,label){return x.url?'<a href="'+esc(x.url)+'" target="_blank" rel="noopener"><b>'+esc(label||x.key)+'</b></a>':'<b>'+esc(label||x.key)+'</b>'}
-async function loadReport(){const error=document.getElementById('error'),btn=document.getElementById('refresh');error.textContent='Sincronizando con Jira…';btn.disabled=true;try{const r=await fetch('/analyze-sprint',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sprint_name:document.getElementById('sprint').value})});const d=await r.json();if(!r.ok)throw new Error(d.detail||'Error');const a=d.analysis,dw=a.delivery_workflow,b=a.bug_progress;error.textContent=a.data_warnings.join(' · ');document.getElementById('sync').textContent='Última sincronización: '+new Date(a.last_synced_at).toLocaleString();document.getElementById('stories').textContent=a.items_by_type.Story||0;document.getElementById('testcases').textContent=a.items_by_type['Test Case']||0;document.getElementById('bugcount').textContent=a.items_by_type.Bug||0;showStage(dw,'pending_development','pending');showStage(dw,'development','development');showStage(dw,'ready_for_qa','readyqa');showStage(dw,'testing','testing');showStage(dw,'ready_for_uat','readyuat');showStage(dw,'failed','failed');document.getElementById('approved').textContent=a.execution_progress.approved+'/'+a.execution_progress.total;document.getElementById('resolvedbugs').textContent=b.resolved+'/'+b.total;document.getElementById('openbugs').textContent=b.open+'/'+b.total;document.getElementById('pass').textContent=a.execution_progress.pass_rate+'%';const dec=document.getElementById('decision');dec.innerHTML='<span class="pill '+(a.release_recommendation==='GO'?'go':'nogo')+'">'+a.release_recommendation+'</span>';document.getElementById('coverage').innerHTML=Object.entries(a.story_coverage).map(([k,v])=>'<tr><td><a href="'+esc(d.jira_base_url||'')+'/browse/'+esc(k)+'" target="_blank"><b>'+esc(k)+'</b></a><br><span class="muted">'+esc(v.summary)+'</span></td><td>'+v.count+'</td><td class="'+v.coverage_risk+'">'+v.coverage_risk+'</td><td><span class="pill '+(v.ready_to_close?'go':'nogo')+'">'+esc(v.delivery_state)+'</span></td></tr>').join('');document.getElementById('execution').innerHTML=Object.entries(a.execution_distribution).map(([k,v])=>'<p>'+esc(k)+': <b>'+v+'</b></p>').join('')||'<p class="muted">Sin datos</p>';document.getElementById('risks').innerHTML=a.risk_reasons.map(x=>'<li>'+esc(x)+'</li>').join('')||'<li>Sin riesgos críticos</li>';document.getElementById('alerts').innerHTML=a.alerts.map(x=>'<div class="alert '+x.level+'">'+issueLink(x)+' — '+esc(x.message)+'</div>').join('')||'<span class="pill go">Sin alertas vencidas</span>';const c=a.team_capacity;document.getElementById('capacity').innerHTML='<p><b>Desarrollo:</b> '+c.developers.queue+' elementos / '+c.developers.people+' personas ('+c.developers.items_per_person+' por persona)</p><p><b>QA/UAT:</b> '+c.qa.queue+' elementos / '+c.qa.people+' personas ('+c.qa.items_per_person+' por persona)</p>'+Object.entries(c.owner_load).map(([o,v])=>'<p class="muted">'+esc(o)+': '+Object.values(v).reduce((s,n)=>s+n,0)+' activos</p>').join('');const f=a.forecast;document.getElementById('forecast').innerHTML=f.available?'<div class="metric">'+f.probability+'%</div><p><span class="pill '+(f.pace==='En ritmo'?'go':f.pace==='En riesgo'?'warn':'nogo')+'">'+esc(f.pace)+'</span></p><p class="muted">'+f.remaining_days+' días restantes · '+f.completed_percentage+'% completado frente a '+f.elapsed_percentage+'% del tiempo</p>':'<p class="muted">'+esc(f.pace)+'</p>';document.getElementById('operational').innerHTML=a.operational_items.map(x=>'<tr><td>'+issueLink(x)+'<br><span class="muted">'+esc(x.summary)+'</span></td><td>'+esc(x.type)+'</td><td>'+esc(x.status)+'</td><td>'+esc(x.assignee)+'</td><td class="nowrap">'+x.age_hours+' h</td></tr>').join('');document.getElementById('summary').textContent=a.executive_summary;document.getElementById('points').textContent=a.sprint_progress.completed_points+'/'+a.sprint_progress.total_points+' puntos — '+a.sprint_progress.percentage+'%';document.getElementById('pointsbar').style.width=Math.min(a.sprint_progress.percentage,100)+'%';document.getElementById('bugs').innerHTML=Object.entries(a.open_bugs_by_priority).map(([k,v])=>'<span class="pill nogo">'+esc(k)+': '+v+'</span> ').join('')||'<span class="pill go">Sin bugs abiertos</span>';document.getElementById('actions').innerHTML=a.action_items.map(x=>'<li>'+esc(x)+'</li>').join('');document.getElementById('results').classList.remove('hidden')}catch(e){error.textContent=e.message}finally{btn.disabled=false}}
+async function loadReport(){const error=document.getElementById('error'),btn=document.getElementById('refresh');error.textContent='Sincronizando con Jira…';btn.disabled=true;try{const r=await fetch('/analyze-sprint',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sprint_name:document.getElementById('sprint').value})});const d=await r.json();if(!r.ok)throw new Error(d.detail||'Error');const a=d.analysis,dw=a.delivery_workflow,b=a.bug_progress;error.textContent=a.data_warnings.join(' · ');document.getElementById('sync').textContent='Última sincronización: '+new Date(a.last_synced_at).toLocaleString();document.getElementById('stories').textContent=a.items_by_type.Story||0;document.getElementById('testcases').textContent=a.items_by_type['Test Case']||0;document.getElementById('bugcount').textContent=a.items_by_type.Bug||0;showStage(dw,'pending_development','pending');showStage(dw,'development','development');showStage(dw,'ready_for_qa','readyqa');showStage(dw,'testing','testing');showStage(dw,'ready_for_uat','readyuat');showStage(dw,'failed','failed');document.getElementById('approved').textContent=a.execution_progress.approved+'/'+a.execution_progress.total;document.getElementById('resolvedbugs').textContent=b.resolved+'/'+b.total;document.getElementById('openbugs').textContent=b.open+'/'+b.total;document.getElementById('pass').textContent=a.execution_progress.pass_rate+'%';const dec=document.getElementById('decision');dec.innerHTML='<span class="pill '+(a.release_recommendation==='GO'?'go':'nogo')+'">'+a.release_recommendation+'</span>';document.getElementById('coverage').innerHTML=Object.entries(a.story_coverage).map(([k,v])=>'<tr><td><a href="'+esc(d.jira_base_url||'')+'/browse/'+esc(k)+'" target="_blank"><b>'+esc(k)+'</b></a><br><span class="muted">'+esc(v.summary)+'</span></td><td>'+v.count+'</td><td class="'+v.coverage_risk+'">'+v.coverage_risk+'</td><td><span class="pill '+(v.ready_to_close?'go':'nogo')+'">'+esc(v.delivery_state)+'</span></td></tr>').join('');document.getElementById('execution').innerHTML=Object.entries(a.execution_distribution).map(([k,v])=>'<p>'+esc(k)+': <b>'+v+'</b></p>').join('')||'<p class="muted">Sin datos</p>';document.getElementById('risks').innerHTML=a.risk_reasons.map(x=>'<li>'+esc(x)+'</li>').join('')||'<li>Sin riesgos críticos</li>';document.getElementById('alerts').innerHTML=a.alerts.map(x=>'<div class="alert '+x.level+'">'+issueLink(x)+' — '+esc(x.message)+'</div>').join('')||'<span class="pill go">Sin alertas vencidas</span>';const c=a.team_capacity;document.getElementById('capacity').innerHTML='<p><b>Activos bajo responsabilidad de desarrollo:</b> '+c.developers.active_total+' / '+c.developers.people+' personas ('+c.developers.items_per_person+' por persona)</p><p><b>Pendientes de trabajo de desarrollo:</b> '+c.developers.queue+' ('+c.developers.queue_per_person+' por persona)</p><p><b>Sin desarrollador asignado:</b> '+c.developers.unassigned+'</p><p><b>Cola QA/UAT:</b> '+c.qa.queue+' / '+c.qa.people+' personas ('+c.qa.items_per_person+' por persona)</p>'+Object.entries(c.owner_load).map(([o,v])=>'<p class="muted">'+esc(o)+': '+Object.values(v).reduce((s,n)=>s+n,0)+' activos</p>').join('');const f=a.forecast;document.getElementById('forecast').innerHTML=f.available?'<div class="metric">'+f.probability+'%</div><p><span class="pill '+(f.pace==='En ritmo'?'go':f.pace==='En riesgo'?'warn':'nogo')+'">'+esc(f.pace)+'</span></p><p class="muted">'+f.remaining_days+' días restantes · '+f.completed_percentage+'% completado frente a '+f.elapsed_percentage+'% del tiempo</p>':'<p class="muted">'+esc(f.pace)+'</p>';document.getElementById('operational').innerHTML=a.operational_items.map(x=>'<tr><td>'+issueLink(x)+'<br><span class="muted">'+esc(x.summary)+'</span></td><td>'+esc(x.type)+'</td><td>'+esc(x.status)+'</td><td>'+esc(x.assignee)+'</td><td class="nowrap">'+x.age_hours+' h</td></tr>').join('');document.getElementById('summary').textContent=a.executive_summary;document.getElementById('points').textContent=a.sprint_progress.completed_points+'/'+a.sprint_progress.total_points+' puntos — '+a.sprint_progress.percentage+'%';document.getElementById('pointsbar').style.width=Math.min(a.sprint_progress.percentage,100)+'%';document.getElementById('bugs').innerHTML=Object.entries(a.open_bugs_by_priority).map(([k,v])=>'<span class="pill nogo">'+esc(k)+': '+v+'</span> ').join('')||'<span class="pill go">Sin bugs abiertos</span>';document.getElementById('actions').innerHTML=a.action_items.map(x=>'<li>'+esc(x)+'</li>').join('');document.getElementById('results').classList.remove('hidden')}catch(e){error.textContent=e.message}finally{btn.disabled=false}}
 </script></body></html>"""
 
 @app.get("/", response_class=HTMLResponse)
@@ -522,6 +559,7 @@ def analyze_sprint(request: AnalyzeRequest) -> dict[str, Any]:
             issues,
             execution_field_id=field_ids["execution_status"],
             story_points_field_id=field_ids["story_points"],
+            qa_assigned_field_id=field_ids["qa_assigned"],
             jira_base_url=cfg.jira_base_url,
         )
         try:

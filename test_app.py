@@ -175,8 +175,10 @@ def test_generates_operational_alerts_and_links():
     result = analyze_coverage([bug], jira_base_url="https://example.atlassian.net", now=now)
     assert result["operational_items"][0]["age_hours"] == 52
     assert result["operational_items"][0]["url"] == "https://example.atlassian.net/browse/PROJ-36"
-    assert len(result["alerts"]) == 1
+    assert len(result["alerts"]) == 2
     assert result["team_capacity"]["qa"]["queue"] == 1
+    assert result["team_capacity"]["developers"]["active_total"] == 1
+    assert result["team_capacity"]["developers"]["queue"] == 0
 
 
 def test_age_and_sprint_forecast():
@@ -186,3 +188,24 @@ def test_age_and_sprint_forecast():
     assert forecast["available"] is True
     assert forecast["remaining_days"] == 7.0
     assert forecast["probability"] > 0
+
+
+def test_shows_developer_and_qa_assigned_separately():
+    test_case = {"key": "PROJ-57", "fields": {"summary": "Invalid login", "issuetype": {"name": "Test Case"}, "status": {"name": "In Review"}, "assignee": {"displayName": "Diego Rojas"}, "customfield_qa": {"displayName": "Valentina Silva"}, "issuelinks": [], "customfield_10097": {"value": "Not Run"}}}
+    result = analyze_coverage([test_case], qa_assigned_field_id="customfield_qa")
+    item = result["operational_items"][0]
+    assert item["developer_assigned"] == "Diego Rojas"
+    assert item["qa_assigned"] == "Valentina Silva"
+    assert item["assignee"] == "Dev: Diego Rojas · QA: Valentina Silva"
+    assert result["team_capacity"]["qa_load"]["Valentina Silva"]["testing"] == 1
+    assert not any("sin QA Assigned" in alert["message"] for alert in result["alerts"])
+
+
+def test_separates_active_development_responsibility_from_development_queue():
+    in_development = {"key": "PROJ-1", "fields": {"summary": "Build", "issuetype": {"name": "Test Case"}, "status": {"name": "In Progress"}, "assignee": {"displayName": "Clara"}, "issuelinks": []}}
+    in_testing = {"key": "PROJ-2", "fields": {"summary": "Test", "issuetype": {"name": "Test Case"}, "status": {"name": "In Review"}, "assignee": {"displayName": "Ramón"}, "issuelinks": []}}
+    result = analyze_coverage([in_development, in_testing])
+    capacity = result["team_capacity"]["developers"]
+    assert capacity["active_total"] == 2
+    assert capacity["queue"] == 1
+    assert capacity["unassigned"] == 0

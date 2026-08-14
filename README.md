@@ -1,4 +1,4 @@
-# OrangeHRM QA Manager Agent — MVP 1.2.0
+# OrangeHRM QA Manager Agent — MVP 1.3.1
 
 Primer MVP para analizar un sprint de Jira y detectar riesgos de cobertura.
 
@@ -31,6 +31,10 @@ Primer MVP para analizar un sprint de Jira y detectar riesgos de cobertura.
 - Incluye enlaces directos a cada elemento de Jira y hora de última sincronización.
 - Calcula carga para 5 desarrolladores y 2 QA, además del reparto actual por responsable.
 - Proyecta la probabilidad de terminar el sprint comparando avance por puntos y tiempo transcurrido.
+- Detecta automáticamente el campo `QA Assigned` (también acepta `QA Assignee` o `QA Owner`).
+- Mantiene `Assignee` como desarrollador y muestra por separado el QA asignado.
+- Calcula la carga de trabajo individual de cada QA y alerta sobre elementos listos para probar que no tienen QA.
+- Separa los elementos activos bajo responsabilidad de desarrollo de la cola que todavía requiere trabajo de desarrollo.
 
 ## Configuración
 
