@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from app import adf_text, age_hours, analyze_coverage, propose_owners, sprint_forecast
+from organize_sprints import Organizer, SPRINT_PLAN
 
 
 def test_flags_story_without_test_cases():
@@ -43,6 +44,7 @@ def test_counts_link_when_it_only_exists_on_test_case():
     )
 
     assert result["story_coverage"]["PROJ-1"]["test_cases"] == ["PROJ-2"]
+    assert result["story_coverage"]["PROJ-1"]["jira_status"] == "Done"
     assert result["execution_distribution"] == {"Passed": 1}
     assert result["execution_progress"] == {"approved": 1, "total": 1, "pass_rate": 100.0}
 
@@ -71,6 +73,17 @@ def test_builds_sprint_report_and_recommended_actions():
 def test_extracts_text_from_jira_description():
     description = {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Objetivo"}]}, {"type": "paragraph", "content": [{"type": "text", "text": "Paso 1"}]}]}
     assert adf_text(description) == "Objetivo\nPaso 1"
+
+
+def test_sprint_plan_has_three_unique_stories_per_sprint():
+    keys = [key for stories in SPRINT_PLAN.values() for key in stories]
+    assert all(len(stories) == 3 for stories in SPRINT_PLAN.values())
+    assert len(keys) == len(set(keys)) == 27
+
+
+def test_organizer_finds_linked_test_cases():
+    issue = {"fields": {"issuelinks": [{"outwardIssue": {"key": "PROJ-80", "fields": {"issuetype": {"name": "Test Case"}}}}]}}
+    assert Organizer.linked_keys(issue, "Test Case") == {"PROJ-80"}
 
 
 def test_assigns_security_bug_to_specialists():
@@ -179,6 +192,9 @@ def test_generates_operational_alerts_and_links():
     assert result["team_capacity"]["qa"]["queue"] == 1
     assert result["team_capacity"]["developers"]["active_total"] == 1
     assert result["team_capacity"]["developers"]["queue"] == 0
+    assert result["today_priorities"][0]["key"] == "PROJ-36"
+    assert result["stage_aging"]["ready_for_qa"]["oldest_hours"] == 52
+    assert result["team_capacity"]["people"][0]["active_items"] == 1
 
 
 def test_age_and_sprint_forecast():
@@ -209,3 +225,51 @@ def test_separates_active_development_responsibility_from_development_queue():
     assert capacity["active_total"] == 2
     assert capacity["queue"] == 1
     assert capacity["unassigned"] == 0
+
+
+def test_analyzes_test_executions_and_evidence():
+    test_case = {"key": "PROJ-52", "fields": {"summary": "Valid login", "issuetype": {"name": "Test Case"}, "status": {"name": "Done"}, "issuelinks": [], "customfield_10097": {"value": "Passed"}}}
+    execution = {"key": "PROJ-70", "fields": {"summary": "TE - QA - PROJ-52 - Valid login", "description": "Test Case relacionado: PROJ-52\nAmbiente: QA", "issuetype": {"name": "Test Execution"}, "status": {"name": "To Do"}, "assignee": None, "attachment": [{"id": "1"}], "created": "2026-08-14T12:00:00Z", "issuelinks": [], "customfield_10097": {"value": "Passed"}, "customfield_qa": {"displayName": "Valentina Silva"}}}
+    result = analyze_coverage([test_case, execution], qa_assigned_field_id="customfield_qa", jira_base_url="https://example.atlassian.net")
+    data = result["test_executions"]
+    assert data["total"] == 1
+    assert data["by_result"] == {"Passed": 1}
+    assert data["by_workflow"] == {"To Do": 1}
+    assert data["by_qa"] == {"Valentina Silva": 1}
+    assert data["by_environment"] == {"QA": 1}
+    assert data["details"][0]["evidence_count"] == 1
+    assert data["latest_by_test_case"]["PROJ-52"]["key"] == "PROJ-70"
+    assert data["test_cases_without_execution"] == []
+    assert data["incomplete_workflow"] == ["PROJ-70"]
+
+
+def test_ignores_executions_from_other_sprints():
+    selected_test = {"key": "PROJ-52", "fields": {"summary": "Selected", "issuetype": {"name": "Test Case"}, "status": {"name": "To Do"}, "issuelinks": []}}
+    historical_execution = {"key": "PROJ-90", "fields": {"summary": "TE - QA - PROJ-99", "description": "Ambiente: QA", "issuetype": {"name": "Test Execution"}, "status": {"name": "Done"}, "assignee": {"displayName": "Mercedes"}, "attachment": [], "created": "2026-08-10T10:00:00Z", "issuelinks": [], "customfield_10097": {"value": "Passed"}}}
+    result = analyze_coverage([selected_test, historical_execution])
+    assert result["test_executions"]["total"] == 0
+    assert result["test_executions"]["by_result"] == {}
+    assert result["test_executions"]["test_cases_without_execution"] == ["PROJ-52"]
+
+
+def test_failed_execution_requires_evidence_and_bug():
+    test_case = {"key": "PROJ-52", "fields": {"summary": "Valid login", "issuetype": {"name": "Test Case"}, "status": {"name": "In Review"}, "issuelinks": []}}
+    execution = {"key": "PROJ-70", "fields": {"summary": "TE - QA - PROJ-52", "description": "Ambiente: UAT", "issuetype": {"name": "Test Execution"}, "status": {"name": "To Do"}, "attachment": [], "created": "2026-08-14T12:00:00Z", "issuelinks": [], "customfield_10097": {"value": "Failed"}}}
+    result = analyze_coverage([test_case, execution])
+    assert result["test_executions"]["failed_without_evidence"] == ["PROJ-70"]
+    assert result["test_executions"]["failed_without_bug"] == ["PROJ-70"]
+    assert result["test_executions"]["failed"] == ["PROJ-70"]
+    assert result["test_executions"]["blocked"] == []
+    assert result["test_executions"]["pending"] == []
+    assert result["test_executions"]["attention_required"][0]["key"] == "PROJ-70"
+    assert result["release_recommendation"] == "NO-GO"
+
+
+def test_test_execution_uses_assignee_as_qa_executor():
+    test_case = {"key": "PROJ-53", "fields": {"summary": "Logout", "issuetype": {"name": "Test Case"}, "status": {"name": "Done"}, "issuelinks": []}}
+    execution = {"key": "PROJ-71", "fields": {"summary": "TE - QA - PROJ-53", "description": "Ambiente: QA", "issuetype": {"name": "Test Execution"}, "status": {"name": "Done"}, "assignee": {"displayName": "Mercedes"}, "attachment": [], "created": "2026-08-15T10:00:00Z", "issuelinks": [], "customfield_10097": {"value": "Passed"}, "customfield_qa": None}}
+    result = analyze_coverage([test_case, execution], qa_assigned_field_id="customfield_qa")
+    detail = result["test_executions"]["details"][0]
+    assert detail["qa_executor"] == "Mercedes"
+    assert result["test_executions"]["by_qa"] == {"Mercedes": 1}
+    assert not any("PROJ-71 no tiene QA" in alert["message"] for alert in result["alerts"])
