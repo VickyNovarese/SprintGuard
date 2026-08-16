@@ -93,11 +93,18 @@ class JiraClient:
         return response.json().get("issues", []), resolved_fields
 
     def sprint_info(self, sprint_name: str) -> dict[str, Any] | None:
+        for sprint in self.list_sprints():
+            if sprint.get("name", "").casefold() == sprint_name.casefold():
+                return sprint
+        return None
+
+    def list_sprints(self) -> list[dict[str, Any]]:
         boards = self.client.get(
             "/rest/agile/1.0/board",
             params={"projectKeyOrId": self.cfg.jira_project_key, "maxResults": 50},
         )
         boards.raise_for_status()
+        sprints_by_id: dict[int, dict[str, Any]] = {}
         for board in boards.json().get("values", []):
             response = self.client.get(
                 f"/rest/agile/1.0/board/{board['id']}/sprint",
@@ -105,9 +112,16 @@ class JiraClient:
             )
             response.raise_for_status()
             for sprint in response.json().get("values", []):
-                if sprint.get("name", "").casefold() == sprint_name.casefold():
-                    return sprint
-        return None
+                if sprint.get("id") is not None:
+                    sprints_by_id[int(sprint["id"])] = sprint
+        state_order = {"active": 0, "future": 1, "closed": 2}
+        return sorted(
+            sprints_by_id.values(),
+            key=lambda sprint: (
+                state_order.get(sprint.get("state", ""), 3),
+                sprint.get("startDate") or sprint.get("endDate") or "",
+            ),
+        )
 
 
 class AnalyzeRequest(BaseModel):
@@ -699,7 +713,7 @@ def analyze_coverage(
     }
 
 
-app = FastAPI(title="SprintGuard API", version="1.8.3")
+app = FastAPI(title="SprintGuard API", version="1.9.0")
 
 DASHBOARD_HTML = """<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -708,14 +722,14 @@ DASHBOARD_HTML = """<!doctype html>
 *{box-sizing:border-box}body{margin:0;font-family:Inter,Segoe UI,Arial;background:var(--bg);color:#172033}
 header{background:linear-gradient(120deg,var(--navy),#253f70);color:white;padding:26px 7vw}header h1{margin:0 0 5px;font-size:26px}header p{margin:0;opacity:.8}
 main{max-width:1180px;margin:24px auto;padding:0 18px}.controls,.card{background:white;border-radius:14px;box-shadow:0 5px 20px #1f2b4410}
-.controls{display:flex;gap:10px;padding:16px;margin-bottom:18px;align-items:center;flex-wrap:wrap}input{flex:1;min-width:240px;padding:11px;border:1px solid #ccd5e2;border-radius:8px}button,.button-link{background:var(--blue);color:white;border:0;padding:11px 18px;border-radius:8px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap}.button-link:hover{color:white;text-decoration:none}.secondary{background:#475569}.demo{max-width:1180px;margin:18px auto 0;padding:12px 18px;background:#e0ecff;color:#1e3a8a;border-radius:10px}
+.controls{display:flex;gap:10px;padding:16px;margin-bottom:18px;align-items:center;flex-wrap:wrap}select{flex:1;min-width:260px;padding:11px;border:1px solid #ccd5e2;border-radius:8px;background:white;color:#172033}button,.button-link{background:var(--blue);color:white;border:0;padding:11px 18px;border-radius:8px;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap}.button-link:hover{color:white;text-decoration:none}.secondary{background:#475569}.demo{max-width:1180px;margin:18px auto 0;padding:12px 18px;background:#e0ecff;color:#1e3a8a;border-radius:10px}
 .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.card{padding:18px}.metric{font-size:30px;font-weight:750;margin-top:6px}.muted{color:#6b7280;font-size:13px}.breakdown{color:#64748b;font-size:12px;margin-top:5px}
 .wide{grid-column:span 2}table{width:100%;border-collapse:collapse;margin-top:8px}th,td{text-align:left;padding:10px;border-bottom:1px solid #edf0f5;font-size:14px}
 .pill{padding:5px 9px;border-radius:999px;font-weight:700;font-size:12px}.go{background:#dcfce7;color:#166534}.nogo{background:#fee2e2;color:#991b1b}.warn{background:#fef3c7;color:#92400e}.low{color:var(--green)}.medium{color:var(--amber)}.high{color:var(--red)}
 #error{color:var(--red);padding:10px 0}.hidden{display:none}.full{grid-column:1/-1}.report-title{display:flex;justify-content:space-between;align-items:center}.bar{height:10px;background:#e5e7eb;border-radius:999px;overflow:hidden}.bar span{display:block;height:100%;background:var(--blue)}@media(max-width:800px){.grid{grid-template-columns:1fr}.wide{grid-column:span 1}}@media print{header,.controls,#error,#print{display:none!important}body{background:white}.card{box-shadow:none;border:1px solid #ddd}.grid{display:block}.card{margin-bottom:12px}}
 a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}.alert{border-left:4px solid var(--amber);padding:9px 11px;margin:8px 0;background:#fffbeb;border-radius:6px}.alert.critical{border-color:var(--red);background:#fef2f2}.item-table{max-height:420px;overflow:auto}.compact-card{align-self:start}.dependency-scroll{max-height:180px;overflow-y:auto;padding-right:8px;scrollbar-width:thin;scrollbar-color:#94a3b8 #eef2f7}.dependency-scroll p{margin:0;padding:9px 3px;border-bottom:1px solid #edf0f5}.dependency-scroll p:last-child{border-bottom:0}.dependency-scroll::-webkit-scrollbar{width:8px}.dependency-scroll::-webkit-scrollbar-track{background:#eef2f7;border-radius:8px}.dependency-scroll::-webkit-scrollbar-thumb{background:#94a3b8;border-radius:8px}.sync{font-size:12px;color:#64748b;margin-left:auto;align-self:center}.nowrap{white-space:nowrap}
 </style></head><body><header><h1>SprintGuard</h1><p>QA &amp; Delivery Intelligence</p></header><div class="demo"><b>Demo de solo lectura.</b> Cobertura, ejecución, evidencias, riesgos y decisión de release desde Jira, sin modificar elementos.</div>
-<main><section class="controls"><input id="sprint" value="PROJ Sprint 1" aria-label="Sprint"><button id="refresh" onclick="loadReport()">Actualizar desde Jira</button><a id="jiraLink" class="button-link secondary hidden" target="_blank" rel="noopener">Ver board en Jira</a><a id="githubLink" class="button-link secondary hidden" target="_blank" rel="noopener">Ver código en GitHub</a><span id="sync" class="sync">Sin sincronizar</span></section><div id="error"></div>
+<main><section class="controls"><select id="sprint" aria-label="Seleccionar sprint"><option value="">Cargando sprints desde Jira…</option></select><button id="refresh" onclick="loadReport()">Actualizar desde Jira</button><a id="jiraLink" class="button-link secondary hidden" target="_blank" rel="noopener">Ver board en Jira</a><a id="githubLink" class="button-link secondary hidden" target="_blank" rel="noopener">Ver código en GitHub</a><span id="sync" class="sync">Sin sincronizar</span></section><div id="error"></div>
 <section id="results" class="grid hidden"><article class="card wide"><h3>Objetivo del sprint</h3><p id="sprintgoal">—</p></article><article class="card"><div class="muted">Salud del sprint</div><div id="health" class="metric">—</div><div id="healthdetail" class="breakdown"></div></article><article class="card"><div class="muted">Prioridades para hoy</div><div id="prioritycount" class="metric">—</div><div class="breakdown">acciones ordenadas por impacto</div></article><article class="card full"><h2>Qué atender hoy</h2><div id="today"></div></article><article class="card"><div class="muted">Historias</div><div id="stories" class="metric">—</div></article><article class="card"><div class="muted">Test Cases</div><div id="testcases" class="metric">—</div></article><article class="card"><div class="muted">Bugs</div><div id="bugcount" class="metric">—</div></article><article class="card"><div class="muted">Test Executions</div><div id="tecount" class="metric">—</div></article><article class="card"><div class="muted">Ejecuciones Passed</div><div id="tepassed" class="metric">—</div></article><article class="card"><div class="muted">Ejecuciones Failed</div><div id="tefailed" class="metric">—</div></article><article class="card"><div class="muted">Ejecuciones Not Run</div><div id="tenotrun" class="metric">—</div></article><article class="card"><div class="muted">Sin QA asignado</div><div id="teunassigned" class="metric">—</div></article><article class="card"><div class="muted">Pendientes</div><div id="pending" class="metric">—</div><div id="pendingbreak" class="breakdown"></div></article><article class="card"><div class="muted">En desarrollo</div><div id="development" class="metric">—</div><div id="developmentbreak" class="breakdown"></div></article><article class="card"><div class="muted">Ready for QA</div><div id="readyqa" class="metric">—</div><div id="readyqabreak" class="breakdown"></div></article><article class="card"><div class="muted">Testing (Review)</div><div id="testing" class="metric">—</div><div id="testingbreak" class="breakdown"></div></article><article class="card"><div class="muted">Ready for UAT</div><div id="readyuat" class="metric">—</div><div id="readyuatbreak" class="breakdown"></div></article><article class="card"><div class="muted">Failed</div><div id="failed" class="metric">—</div><div id="failedbreak" class="breakdown"></div></article><article class="card"><div class="muted">TC aprobados</div><div id="approved" class="metric">—</div></article><article class="card"><div class="muted">Bugs resueltos</div><div id="resolvedbugs" class="metric">—</div></article><article class="card"><div class="muted">Bugs abiertos</div><div id="openbugs" class="metric">—</div></article><article class="card"><div class="muted">Pass rate final</div><div id="pass" class="metric">—</div></article><article class="card"><div class="muted">Recomendación</div><div id="decision" class="metric">—</div></article>
 <article class="card"><div class="muted">Ejecuciones Blocked</div><div id="teblocked" class="metric">—</div></article>
 <article class="card wide"><h3>Cobertura por historia</h3><table><thead><tr><th>Historia</th><th>Estado Jira</th><th>Casos</th><th>Riesgo</th><th>Preparación</th></tr></thead><tbody id="coverage"></tbody></table></article>
@@ -732,7 +746,9 @@ a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}.aler
 <script>function esc(s){return String(s).replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]))}
 function showStage(dw,stage,id){const x=dw[stage]||{total:0,test_cases:0,bugs:0};document.getElementById(id).textContent=x.total;document.getElementById(id+'break').textContent=x.test_cases+' TC · '+x.bugs+' Bugs'}
 function issueLink(x,label){return x.url?'<a href="'+esc(x.url)+'" target="_blank" rel="noopener"><b>'+esc(label||x.key)+'</b></a>':'<b>'+esc(label||x.key)+'</b>'}
+async function loadSprints(){const select=document.getElementById('sprint'),error=document.getElementById('error');try{const r=await fetch('/sprints?refresh='+Date.now(),{cache:'no-store'}),d=await r.json();if(!r.ok)throw new Error(d.detail||'No se pudieron cargar los sprints');select.innerHTML=d.sprints.map(s=>'<option value="'+esc(s.name)+'" '+(s.selected?'selected':'')+'>'+esc(s.label)+'</option>').join('');if(!d.sprints.length)throw new Error('Jira no devolvió sprints disponibles');await loadReport()}catch(e){select.innerHTML='<option value="PROJ Sprint 1">PROJ Sprint 1 (selección de respaldo)</option>';error.textContent=e.message}}
 async function loadReport(){const error=document.getElementById('error'),btn=document.getElementById('refresh');error.textContent='Sincronizando con Jira…';btn.disabled=true;try{const r=await fetch('/analyze-sprint',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sprint_name:document.getElementById('sprint').value})});const d=await r.json();if(!r.ok)throw new Error(d.detail||'Error');const a=d.analysis,dw=a.delivery_workflow,b=a.bug_progress,te=a.test_executions;error.textContent=a.data_warnings.join(' · ');document.getElementById('sync').textContent='Última sincronización: '+new Date(a.last_synced_at).toLocaleString();const jl=document.getElementById('jiraLink'),gl=document.getElementById('githubLink');if(d.jira_board_url){jl.href=d.jira_board_url;jl.classList.remove('hidden')}if(d.github_repository_url){gl.href=d.github_repository_url;gl.classList.remove('hidden')}document.getElementById('stories').textContent=a.items_by_type.Story||0;document.getElementById('testcases').textContent=a.items_by_type['Test Case']||0;document.getElementById('bugcount').textContent=a.items_by_type.Bug||0;document.getElementById('tecount').textContent=te.total;document.getElementById('tepassed').textContent=te.by_result.Passed||0;document.getElementById('tefailed').textContent=(te.by_result.Failed||0)+(te.by_result.Blocked||0);document.getElementById('tenotrun').textContent=te.by_result['Not Run']||0;document.getElementById('teunassigned').textContent=te.by_qa['Sin QA asignado']||0;document.getElementById('teworkflow').innerHTML=Object.entries(te.by_workflow).map(([k,v])=>'<span class="pill '+(k==='Done'?'go':k==='Failed'?'nogo':'warn')+'>'+esc(k)+': '+v+'</span> ').join('')||'<span class="muted">Sin estados</span>';showStage(dw,'pending_development','pending');showStage(dw,'development','development');showStage(dw,'ready_for_qa','readyqa');showStage(dw,'testing','testing');showStage(dw,'ready_for_uat','readyuat');showStage(dw,'failed','failed');document.getElementById('approved').textContent=a.execution_progress.approved+'/'+a.execution_progress.total;document.getElementById('resolvedbugs').textContent=b.resolved+'/'+b.total;document.getElementById('openbugs').textContent=b.open+'/'+b.total;document.getElementById('pass').textContent=a.execution_progress.pass_rate+'%';const dec=document.getElementById('decision');dec.innerHTML='<span class="pill '+(a.release_recommendation==='GO'?'go':'nogo')+'">'+a.release_recommendation+'</span>';document.getElementById('coverage').innerHTML=Object.entries(a.story_coverage).map(([k,v])=>'<tr><td><a href="'+esc(d.jira_base_url||'')+'/browse/'+esc(k)+'" target="_blank"><b>'+esc(k)+'</b></a><br><span class="muted">'+esc(v.summary)+'</span></td><td>'+v.count+'</td><td class="'+v.coverage_risk+'">'+v.coverage_risk+'</td><td><span class="pill '+(v.ready_to_close?'go':'nogo')+'">'+esc(v.delivery_state)+'</span></td></tr>').join('');document.getElementById('execution').innerHTML=Object.entries(a.execution_distribution).map(([k,v])=>'<p>'+esc(k)+': <b>'+v+'</b></p>').join('')||'<p class="muted">Sin datos</p>';document.getElementById('risks').innerHTML=a.risk_reasons.map(x=>'<li>'+esc(x)+'</li>').join('')||'<li>Sin riesgos críticos</li>';document.getElementById('alerts').innerHTML=a.alerts.map(x=>'<div class="alert '+x.level+'">'+issueLink(x)+' — '+esc(x.message)+'</div>').join('')||'<span class="pill go">Sin alertas vencidas</span>';const c=a.team_capacity;document.getElementById('capacity').innerHTML='<p><b>Activos bajo responsabilidad de desarrollo:</b> '+c.developers.active_total+' / '+c.developers.people+' personas ('+c.developers.items_per_person+' por persona)</p><p><b>Pendientes de trabajo de desarrollo:</b> '+c.developers.queue+' ('+c.developers.queue_per_person+' por persona)</p><p><b>Sin desarrollador asignado:</b> '+c.developers.unassigned+'</p><p><b>Cola QA/UAT:</b> '+c.qa.queue+' / '+c.qa.people+' personas ('+c.qa.items_per_person+' por persona)</p>'+Object.entries(c.owner_load).map(([o,v])=>'<p class="muted">'+esc(o)+': '+Object.values(v).reduce((s,n)=>s+n,0)+' activos</p>').join('');const f=a.forecast;document.getElementById('forecast').innerHTML=f.available?'<div class="metric">'+f.probability+'%</div><p><span class="pill '+(f.pace==='En ritmo'?'go':f.pace==='En riesgo'?'warn':'nogo')+'">'+esc(f.pace)+'</span></p><p class="muted">'+f.remaining_days+' días restantes · '+f.completed_percentage+'% completado frente a '+f.elapsed_percentage+'% del tiempo</p>':'<p class="muted">'+esc(f.pace)+'</p>';document.getElementById('operational').innerHTML=a.operational_items.map(x=>'<tr><td>'+issueLink(x)+'<br><span class="muted">'+esc(x.summary)+'</span></td><td>'+esc(x.type)+'</td><td>'+esc(x.status)+'</td><td>'+esc(x.assignee)+'</td><td class="nowrap">'+x.age_hours+' h</td></tr>').join('');document.getElementById('executionrows').innerHTML=te.details.map(x=>'<tr><td>'+issueLink(x)+'</td><td>'+esc(x.test_case_key||'Sin referencia')+'</td><td><span class="pill '+(x.status==='Done'?'go':x.status==='Failed'?'nogo':'warn')+'">'+esc(x.status)+'</span></td><td>'+esc(x.environment)+'</td><td>'+esc(x.qa_executor)+'</td><td><span class="pill '+(x.result==='Passed'?'go':x.result==='Not Run'?'warn':'nogo')+'">'+esc(x.result)+'</span></td><td>'+x.evidence_count+'</td></tr>').join('')||'<tr><td colspan="7" class="muted">Sin Test Execution</td></tr>';document.getElementById('summary').textContent=a.executive_summary;document.getElementById('points').textContent=a.sprint_progress.completed_points+'/'+a.sprint_progress.total_points+' puntos — '+a.sprint_progress.percentage+'%';document.getElementById('pointsbar').style.width=Math.min(a.sprint_progress.percentage,100)+'%';document.getElementById('bugs').innerHTML=Object.entries(a.open_bugs_by_priority).map(([k,v])=>'<span class="pill nogo">'+esc(k)+': '+v+'</span> ').join('')||'<span class="pill go">Sin bugs abiertos</span>';document.getElementById('actions').innerHTML=a.action_items.map(x=>'<li>'+esc(x)+'</li>').join('');document.getElementById('results').classList.remove('hidden')}catch(e){error.textContent=e.message}finally{btn.disabled=false}}
+document.addEventListener('DOMContentLoaded',loadSprints);
 </script><script>
 function renderPM(a,jiraBaseUrl){
  const te=a.test_executions;
@@ -763,6 +779,31 @@ def dashboard() -> str:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/sprints")
+def available_sprints() -> dict[str, Any]:
+    try:
+        jira = JiraClient(Settings())
+        sprints = jira.list_sprints()
+        selected_id = next((sprint.get("id") for sprint in sprints if sprint.get("state") == "active"), None)
+        if selected_id is None and sprints:
+            selected_id = sprints[0].get("id")
+        state_labels = {"active": "Actual", "future": "Próximo", "closed": "Cerrado"}
+        return {
+            "sprints": [
+                {
+                    "id": sprint.get("id"),
+                    "name": sprint.get("name", ""),
+                    "state": sprint.get("state", ""),
+                    "label": f"{sprint.get('name', '')} — {state_labels.get(sprint.get('state', ''), 'Sin estado')}",
+                    "selected": sprint.get("id") == selected_id,
+                }
+                for sprint in sprints
+            ]
+        }
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"No se pudieron cargar los sprints desde Jira ({exc.response.status_code})") from exc
 
 
 @app.post("/analyze-sprint")
