@@ -114,6 +114,21 @@ class AnalyzeRequest(BaseModel):
     sprint_name: str
 
 
+def build_sprint_jql(project_key: str, sprint_name: str, sprint: dict[str, Any] | None) -> str:
+    """Build an exact sprint query, preferring Jira's unique numeric sprint ID."""
+    sprint_id = (sprint or {}).get("id")
+    if sprint_id is not None:
+        sprint_filter = f"sprint = {int(sprint_id)}"
+    else:
+        escaped_name = sprint_name.replace('\\', '\\\\').replace('"', '\\"')
+        sprint_filter = f'sprint = "{escaped_name}"'
+    return (
+        f"project = {project_key} AND "
+        f"({sprint_filter} OR issuetype = \"Test Execution\") "
+        "ORDER BY issuetype, key"
+    )
+
+
 def parse_jira_date(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -684,7 +699,7 @@ def analyze_coverage(
     }
 
 
-app = FastAPI(title="SprintGuard API", version="1.8.1")
+app = FastAPI(title="SprintGuard API", version="1.8.3")
 
 DASHBOARD_HTML = """<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -698,7 +713,7 @@ main{max-width:1180px;margin:24px auto;padding:0 18px}.controls,.card{background
 .wide{grid-column:span 2}table{width:100%;border-collapse:collapse;margin-top:8px}th,td{text-align:left;padding:10px;border-bottom:1px solid #edf0f5;font-size:14px}
 .pill{padding:5px 9px;border-radius:999px;font-weight:700;font-size:12px}.go{background:#dcfce7;color:#166534}.nogo{background:#fee2e2;color:#991b1b}.warn{background:#fef3c7;color:#92400e}.low{color:var(--green)}.medium{color:var(--amber)}.high{color:var(--red)}
 #error{color:var(--red);padding:10px 0}.hidden{display:none}.full{grid-column:1/-1}.report-title{display:flex;justify-content:space-between;align-items:center}.bar{height:10px;background:#e5e7eb;border-radius:999px;overflow:hidden}.bar span{display:block;height:100%;background:var(--blue)}@media(max-width:800px){.grid{grid-template-columns:1fr}.wide{grid-column:span 1}}@media print{header,.controls,#error,#print{display:none!important}body{background:white}.card{box-shadow:none;border:1px solid #ddd}.grid{display:block}.card{margin-bottom:12px}}
-a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}.alert{border-left:4px solid var(--amber);padding:9px 11px;margin:8px 0;background:#fffbeb;border-radius:6px}.alert.critical{border-color:var(--red);background:#fef2f2}.item-table{max-height:420px;overflow:auto}.sync{font-size:12px;color:#64748b;margin-left:auto;align-self:center}.nowrap{white-space:nowrap}
+a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}.alert{border-left:4px solid var(--amber);padding:9px 11px;margin:8px 0;background:#fffbeb;border-radius:6px}.alert.critical{border-color:var(--red);background:#fef2f2}.item-table{max-height:420px;overflow:auto}.compact-card{align-self:start}.dependency-scroll{max-height:180px;overflow-y:auto;padding-right:8px;scrollbar-width:thin;scrollbar-color:#94a3b8 #eef2f7}.dependency-scroll p{margin:0;padding:9px 3px;border-bottom:1px solid #edf0f5}.dependency-scroll p:last-child{border-bottom:0}.dependency-scroll::-webkit-scrollbar{width:8px}.dependency-scroll::-webkit-scrollbar-track{background:#eef2f7;border-radius:8px}.dependency-scroll::-webkit-scrollbar-thumb{background:#94a3b8;border-radius:8px}.sync{font-size:12px;color:#64748b;margin-left:auto;align-self:center}.nowrap{white-space:nowrap}
 </style></head><body><header><h1>SprintGuard</h1><p>QA &amp; Delivery Intelligence</p></header><div class="demo"><b>Demo de solo lectura.</b> Cobertura, ejecución, evidencias, riesgos y decisión de release desde Jira, sin modificar elementos.</div>
 <main><section class="controls"><input id="sprint" value="PROJ Sprint 1" aria-label="Sprint"><button id="refresh" onclick="loadReport()">Actualizar desde Jira</button><a id="jiraLink" class="button-link secondary hidden" target="_blank" rel="noopener">Ver board en Jira</a><a id="githubLink" class="button-link secondary hidden" target="_blank" rel="noopener">Ver código en GitHub</a><span id="sync" class="sync">Sin sincronizar</span></section><div id="error"></div>
 <section id="results" class="grid hidden"><article class="card wide"><h3>Objetivo del sprint</h3><p id="sprintgoal">—</p></article><article class="card"><div class="muted">Salud del sprint</div><div id="health" class="metric">—</div><div id="healthdetail" class="breakdown"></div></article><article class="card"><div class="muted">Prioridades para hoy</div><div id="prioritycount" class="metric">—</div><div class="breakdown">acciones ordenadas por impacto</div></article><article class="card full"><h2>Qué atender hoy</h2><div id="today"></div></article><article class="card"><div class="muted">Historias</div><div id="stories" class="metric">—</div></article><article class="card"><div class="muted">Test Cases</div><div id="testcases" class="metric">—</div></article><article class="card"><div class="muted">Bugs</div><div id="bugcount" class="metric">—</div></article><article class="card"><div class="muted">Test Executions</div><div id="tecount" class="metric">—</div></article><article class="card"><div class="muted">Ejecuciones Passed</div><div id="tepassed" class="metric">—</div></article><article class="card"><div class="muted">Ejecuciones Failed</div><div id="tefailed" class="metric">—</div></article><article class="card"><div class="muted">Ejecuciones Not Run</div><div id="tenotrun" class="metric">—</div></article><article class="card"><div class="muted">Sin QA asignado</div><div id="teunassigned" class="metric">—</div></article><article class="card"><div class="muted">Pendientes</div><div id="pending" class="metric">—</div><div id="pendingbreak" class="breakdown"></div></article><article class="card"><div class="muted">En desarrollo</div><div id="development" class="metric">—</div><div id="developmentbreak" class="breakdown"></div></article><article class="card"><div class="muted">Ready for QA</div><div id="readyqa" class="metric">—</div><div id="readyqabreak" class="breakdown"></div></article><article class="card"><div class="muted">Testing (Review)</div><div id="testing" class="metric">—</div><div id="testingbreak" class="breakdown"></div></article><article class="card"><div class="muted">Ready for UAT</div><div id="readyuat" class="metric">—</div><div id="readyuatbreak" class="breakdown"></div></article><article class="card"><div class="muted">Failed</div><div id="failed" class="metric">—</div><div id="failedbreak" class="breakdown"></div></article><article class="card"><div class="muted">TC aprobados</div><div id="approved" class="metric">—</div></article><article class="card"><div class="muted">Bugs resueltos</div><div id="resolvedbugs" class="metric">—</div></article><article class="card"><div class="muted">Bugs abiertos</div><div id="openbugs" class="metric">—</div></article><article class="card"><div class="muted">Pass rate final</div><div id="pass" class="metric">—</div></article><article class="card"><div class="muted">Recomendación</div><div id="decision" class="metric">—</div></article>
@@ -708,7 +723,7 @@ a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}.aler
 <article class="card wide"><h3>Alertas operativas</h3><div id="alerts"></div></article><article class="card"><h3>Capacidad del equipo</h3><div id="capacity"></div></article><article class="card"><h3>Proyección del sprint</h3><div id="forecast"></div></article>
 <article class="card full"><h3>Workflow de Test Execution</h3><div id="teworkflow"></div></article>
 <article class="card full"><h3>Ejecuciones que requieren atención</h3><div id="executionattention"></div></article>
-<article class="card wide"><h3>Tiempo por estado</h3><div id="aging"></div></article><article class="card wide"><h3>Dependencias y bloqueos</h3><div id="dependencies"></div></article>
+<article class="card wide"><h3>Tiempo por estado</h3><div id="aging"></div></article><article class="card wide compact-card"><h3>Dependencias y bloqueos</h3><div id="dependencies" class="dependency-scroll"></div></article>
 <article class="card full"><h3>Carga individual</h3><div class="item-table"><table><thead><tr><th>Persona</th><th>Rol</th><th>Elementos activos</th><th>Story points</th><th>Distribución</th></tr></thead><tbody id="people"></tbody></table></div></article>
 <article class="card full"><h3>Seguimiento diario por antigüedad</h3><div class="item-table"><table><thead><tr><th>Elemento</th><th>Tipo</th><th>Estado</th><th>Responsables (Dev / QA)</th><th>Tiempo en estado</th></tr></thead><tbody id="operational"></tbody></table></div></article>
 <article class="card full"><h3>Ejecuciones y evidencias</h3><div class="item-table"><table><thead><tr><th>Test Execution</th><th>Test Case</th><th>Estado Jira</th><th>Ambiente</th><th>QA ejecutor (Assignee)</th><th>Resultado</th><th>Evidencias</th></tr></thead><tbody id="executionrows"></tbody></table></div></article>
@@ -755,11 +770,13 @@ def analyze_sprint(request: AnalyzeRequest) -> dict[str, Any]:
     try:
         cfg = Settings()
         jira = JiraClient(cfg)
-        jql = (
-            f'project = {cfg.jira_project_key} AND '
-            f'(sprint = "{request.sprint_name}" OR issuetype = "Test Execution") '
-            'ORDER BY issuetype, key'
-        )
+        sprint_warning = None
+        try:
+            sprint = jira.sprint_info(request.sprint_name)
+        except httpx.HTTPError:
+            sprint = None
+            sprint_warning = "No se pudieron leer los datos del sprint; se utilizó el nombre como filtro y la proyección temporal no está disponible"
+        jql = build_sprint_jql(cfg.jira_project_key, request.sprint_name, sprint)
         issues, field_ids = jira.search(jql)
         analysis = analyze_coverage(
             issues,
@@ -769,11 +786,8 @@ def analyze_sprint(request: AnalyzeRequest) -> dict[str, Any]:
             execution_date_field_id=field_ids["execution_date"],
             jira_base_url=cfg.jira_base_url,
         )
-        try:
-            sprint = jira.sprint_info(request.sprint_name)
-        except httpx.HTTPError:
-            sprint = None
-            analysis["data_warnings"].append("No se pudieron leer las fechas del sprint; la proyección temporal no está disponible")
+        if sprint_warning:
+            analysis["data_warnings"].append(sprint_warning)
         analysis["forecast"] = sprint_forecast(
             sprint,
             analysis["sprint_progress"]["completed_points"],

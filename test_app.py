@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from app import adf_text, age_hours, analyze_coverage, propose_owners, sprint_forecast
+from app import adf_text, age_hours, analyze_coverage, build_sprint_jql, propose_owners, sprint_forecast
 from organize_sprints import Organizer, SPRINT_PLAN
 
 
@@ -19,6 +19,12 @@ def test_flags_story_without_test_cases():
     assert result["stories_without_tests"] == ["PROJ-1"]
     assert result["points_by_type"]["Story"] == 5
     assert result["release_recommendation"] == "NO-GO"
+
+
+def test_sprint_query_uses_unique_id_to_avoid_sprint_name_collision():
+    jql = build_sprint_jql("PROJ", "PROJ Sprint 1", {"id": 42, "name": "PROJ Sprint 1"})
+    assert "sprint = 42" in jql
+    assert 'sprint = "PROJ Sprint 1"' not in jql
 
 
 def test_go_when_story_has_three_tests_and_no_failures():

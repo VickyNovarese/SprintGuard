@@ -1,6 +1,8 @@
 # SprintGuard — QA & Delivery Intelligence
 
-SprintGuard 1.8.1 analiza un sprint de Jira y transforma sus historias, pruebas, ejecuciones, bugs y evidencias en información accionable para QA, Project y Delivery Management.
+SprintGuard 1.8.3 analiza un sprint de Jira y transforma sus historias, pruebas, ejecuciones, bugs y evidencias en información accionable para QA, Project y Delivery Management.
+
+La consulta usa el ID único del sprint de Jira para evitar colisiones entre nombres similares, por ejemplo `PROJ Sprint 1` y `PROJ Sprint 10`.
 
 ## Qué hace
 
@@ -56,6 +58,7 @@ SprintGuard 1.8.1 analiza un sprint de Jira y transforma sus historias, pruebas,
 - Muestra las ejecuciones que requieren atención con clave, Test Case, estado Jira, QA y enlace directo.
 - Incluye un organizador controlado para distribuir Sprint 2-10 con 3 historias y 3 Test Cases vinculados por historia.
 - Las métricas de ejecución incluyen únicamente Test Executions vinculadas a Test Cases del sprint seleccionado; los resultados históricos de otros sprints quedan excluidos.
+- La sección de dependencias y bloqueos utiliza una tarjeta compacta con desplazamiento vertical.
 
 ## Configuración
 
